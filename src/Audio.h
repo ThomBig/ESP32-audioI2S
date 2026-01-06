@@ -22,13 +22,19 @@
 #include <codecvt>
 #include <locale>
 
+#define USE_ESP_I2S_LIB
+
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
 #include <NetworkClient.h>
 #include <NetworkClientSecure.h>
 #endif
 
 #if ESP_IDF_VERSION_MAJOR == 5
+#ifdef USE_ESP_I2S_LIB
+#include <ESP_I2S.h>	
+#else
 #include <driver/i2s_std.h>
+#endif
 #else
 #include <driver/i2s.h>
 #endif
@@ -55,6 +61,8 @@ extern __attribute__((weak)) void audio_eof_speech(const char*);
 extern __attribute__((weak)) void audio_eof_stream(const char*); // The webstream comes to an end
 extern __attribute__((weak)) void audio_process_i2s(int16_t* outBuff, uint16_t validSamples, uint8_t bitsPerSample, uint8_t channels, bool *continueI2S); // record audiodata or send via BT
 extern __attribute__((weak)) void audio_log(uint8_t logLevel, const char* msg, const char* arg);
+extern __attribute__((weak)) void audio_host_failed(const char*); //nTomek
+extern __attribute__((weak)) void audio_i2s_event(uint8_t id); //nTomek
 
 //----------------------------------------------------------------------------------------------------------------------
 
@@ -132,12 +140,21 @@ static StaticTask_t __attribute__((unused)) xAudioTaskBuffer;
 static StackType_t  __attribute__((unused)) xAudioStack[AUDIO_STACK_SIZE];
 extern char audioI2SVers[];
 
+class I2SClass;
+
 class Audio : private AudioBuffer{
 
     AudioBuffer InBuff; // instance of input buffer
+#ifdef USE_ESP_I2S_LIB	
+	I2SClass& i2s_cl;
+#endif
 
 public:
-    Audio(uint8_t i2sPort = I2S_NUM_0);
+#ifdef USE_ESP_I2S_LIB	
+	Audio(I2SClass &i2s_ref, uint8_t i2sPort = I2S_NUM_0);
+#else
+	Audio(uint8_t i2sPort = I2S_NUM_0);
+#endif	
     ~Audio();
     bool openai_speech(const String& api_key, const String& model, const String& input, const String& instructions, const String& voice, const String& response_format, const String& speed);
     bool connecttohost(const char* host, const char* user = "", const char* pwd = "");
@@ -241,8 +258,10 @@ private:
   bool            parseContentType(char* ct);
   bool            parseHttpResponseHeader();
   bool            initializeDecoder(uint8_t codec);
+public:  
   esp_err_t       I2Sstart();
   esp_err_t       I2Sstop();
+private:  
   void            zeroI2Sbuff();
   void            IIR_filterChain0(int16_t iir_in[2], bool clear = false);
   void            IIR_filterChain1(int16_t iir_in[2], bool clear = false);
@@ -623,9 +642,15 @@ private:
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 #if ESP_IDF_VERSION_MAJOR == 5
+#ifdef USE_ESP_I2S_LIB	
+	i2s_data_bit_width_t 	m_i2s_bps; //I2S_DATA_BIT_WIDTH_16BIT;
+	i2s_mode_t 				m_i2s_mode; //I2S_MODE_STD;
+	i2s_slot_mode_t 		m_i2s_slot; //I2S_SLOT_MODE_STEREO;
+#else
     i2s_chan_handle_t     m_i2s_tx_handle = {};
     i2s_chan_config_t     m_i2s_chan_cfg = {}; // stores I2S channel values
     i2s_std_config_t      m_i2s_std_cfg = {};  // stores I2S driver values
+#endif	
 #else
     i2s_config_t          m_i2s_config = {};
     i2s_pin_config_t      m_pin_config = {};

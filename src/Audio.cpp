@@ -162,8 +162,12 @@ uint32_t AudioBuffer::getWritePos() { return m_writePtr - m_buffer; }
 uint32_t AudioBuffer::getReadPos() { return m_readPtr - m_buffer; }
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 // clang-format off
-Audio::Audio(uint8_t i2sPort) {
 
+#ifdef USE_ESP_I2S_LIB	
+	Audio::Audio(I2SClass& i2s_ref, uint8_t i2sPort) : i2s_cl(i2s_ref) {
+#else
+	Audio::Audio(uint8_t i2sPort) {
+#endif
     mutex_playAudioData = xSemaphoreCreateMutex();
     mutex_audioTask     = xSemaphoreCreateMutex();
 
@@ -184,6 +188,13 @@ Audio::Audio(uint8_t i2sPort) {
     m_i2s_num = i2sPort;  // i2s port number
 
     // -------- I2S configuration -------------------------------------------------------------------------------------------
+#ifdef USE_ESP_I2S_LIB	
+	m_i2s_bps = I2S_DATA_BIT_WIDTH_16BIT;
+	m_i2s_mode = I2S_MODE_STD;
+	m_i2s_slot = I2S_SLOT_MODE_STEREO;
+
+#else
+	
     m_i2s_chan_cfg.id            = (i2s_port_t)m_i2s_num;  // I2S_NUM_AUTO, I2S_NUM_0, I2S_NUM_1
     m_i2s_chan_cfg.role          = I2S_ROLE_MASTER;        // I2S controller master role, bclk and lrc signal will be set to output
     m_i2s_chan_cfg.dma_desc_num  = 8;                      // number of DMA buffer
@@ -204,6 +215,8 @@ Audio::Audio(uint8_t i2sPort) {
     m_i2s_std_cfg.clk_cfg.clk_src        = I2S_CLK_SRC_DEFAULT;        // Select PLL_F160M as the default source clock
     m_i2s_std_cfg.clk_cfg.mclk_multiple  = I2S_MCLK_MULTIPLE_128;      // mclk = sample_rate * 256
     i2s_channel_init_std_mode(m_i2s_tx_handle, &m_i2s_std_cfg);
+#endif
+	
     I2Sstart();
     m_sampleRate = 44100;
 
@@ -221,11 +234,17 @@ Audio::Audio(uint8_t i2sPort) {
 Audio::~Audio() {
     // I2Sstop(m_i2s_num);
     // InBuff.~AudioBuffer(); #215 the AudioBuffer is automatically destroyed by the destructor
-    setDefaults();
+	
+	AUDIO_INFO("Audio destructor...");
+	
+    //setDefaults();
+	//AUDIO_INFO("setDefaults");
 
+#ifdef USE_ESP_I2S_LIB	
+//	I2Sstop();
+#else
     i2s_channel_disable(m_i2s_tx_handle);
     i2s_del_channel(m_i2s_tx_handle);
-
     x_ps_free(&m_playlistBuff);
     x_ps_free(&m_chbuf);
     x_ps_free(&m_lastHost);
@@ -233,10 +252,21 @@ Audio::~Audio() {
     x_ps_free(&m_ibuff);
     x_ps_free(&m_lastM3U8host);
     x_ps_free(&m_speechtxt);
+#endif
 
+	AUDIO_INFO("x_ps_free");
+	
     stopAudioTask();
-    vSemaphoreDelete(mutex_playAudioData);
+	AUDIO_INFO("stopAudioTask");
+    
+	vSemaphoreDelete(mutex_playAudioData);
+	AUDIO_INFO("vSemaphoreDelete: mutex_playAudioData");
+	
     vSemaphoreDelete(mutex_audioTask);
+	AUDIO_INFO("vSemaphoreDelete: mutex_audioTask");
+#ifdef USE_ESP_I2S_LIB	
+	//I2Sstop();
+#endif	
 }
 // clang-format on
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -251,18 +281,40 @@ void Audio::initInBuff() {
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 esp_err_t Audio::I2Sstart() {
     zeroI2Sbuff();
+#ifdef USE_ESP_I2S_LIB
+	AUDIO_INFO("I2Sstart: <ESP_I2S.h>");
+	if (i2s_cl.begin(m_i2s_mode, m_sampleRate, m_i2s_bps, m_i2s_slot))
+	{
+		if (audio_i2s_event) 
+			audio_i2s_event(1);
+		return ESP_OK;
+	}
+	else
+		return ESP_ERR_INVALID_STATE;
+#else
     return i2s_channel_enable(m_i2s_tx_handle);
+#endif
 }
 
 esp_err_t Audio::I2Sstop() {
     memset(m_outBuff, 0, m_outbuffSize * sizeof(int16_t)); // Clear OutputBuffer
+#ifdef USE_ESP_I2S_LIB
+	if (audio_i2s_event) 
+		audio_i2s_event(0);
+	AUDIO_INFO("I2Send: <ESP_I2S.h>");
+	i2s_cl.end();
+	return ESP_OK;
+#else
     return i2s_channel_disable(m_i2s_tx_handle);
+#endif
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 void Audio::zeroI2Sbuff(){
     uint8_t *buff = (uint8_t*)calloc(128, sizeof(uint8_t)); // From IDF V5 there is no longer the zero_dma_buff() function.
     size_t bytes_loaded = 0;                                // As a replacement, we write a small amount of zeros in the buffer and thus reset the entire buffer.
+#ifndef USE_ESP_I2S_LIB	
     i2s_channel_preload_data(m_i2s_tx_handle, buff, 128, &bytes_loaded);
+#endif	
     x_ps_free(&buff);
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -615,6 +667,8 @@ bool Audio::connecttohost(const char* host, const char* user, const char* pwd) {
         if(audio_showstreamtitle) audio_showstreamtitle("");
         if(audio_icydescription) audio_icydescription("");
         if(audio_icyurl) audio_icyurl("");
+		if(audio_host_failed) {audio_host_failed(""); m_lastHost[0] = 0;} //nTomek
+
     }
 
 exit:
@@ -2459,7 +2513,12 @@ i2swrite:
 
     validSamples = m_validSamples;
 
+#ifdef USE_ESP_I2S_LIB
+	i2s_bytesConsumed = i2s_cl.write((uint8_t*)m_outBuff + count, validSamples * sampleSize);
+	err = i2s_cl.lastError();
+#else
     err = i2s_channel_write(m_i2s_tx_handle, (int16_t*)m_outBuff + count, validSamples * sampleSize, &i2s_bytesConsumed, 10);
+#endif
     if( ! (err == ESP_OK || err == ESP_ERR_TIMEOUT)) goto exit;
     m_validSamples -= i2s_bytesConsumed / sampleSize;
     count += i2s_bytesConsumed / 2;
@@ -5030,16 +5089,25 @@ bool Audio::setPinout(uint8_t BCLK, uint8_t LRC, uint8_t DOUT, int8_t MCLK) {
     trim(audioI2SVers);
     AUDIO_INFO("audioI2S %s", audioI2SVers);
 
+#ifndef USE_ESP_I2S_LIB
     i2s_std_gpio_config_t gpio_cfg = {};
     gpio_cfg.bclk = (gpio_num_t)BCLK;
     gpio_cfg.din = (gpio_num_t)I2S_GPIO_UNUSED;
     gpio_cfg.dout = (gpio_num_t)DOUT;
     gpio_cfg.mclk = (gpio_num_t)MCLK;
     gpio_cfg.ws = (gpio_num_t)LRC;
-    I2Sstop();
+#endif	
+	I2Sstop();
+	
+#ifdef USE_ESP_I2S_LIB
+	AUDIO_INFO("i2s_cl.setPins: <ESP_I2S.h>");
+	Serial.println("-----> i2s_cl.setPins: <ESP_I2S.h> <------");
+	i2s_cl.setPins(BCLK, LRC, DOUT);
+	result = ESP_OK;
+#else	
     result = i2s_channel_reconfig_std_gpio(m_i2s_tx_handle, &gpio_cfg);
-    I2Sstart();
-
+#endif
+	I2Sstart();
     return (result == ESP_OK);
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -5177,7 +5245,9 @@ uint8_t Audio::getChannels() {
 void Audio::reconfigI2S(){
 
     I2Sstop();
+#ifdef USE_ESP_I2S_LIB
 
+#else
     if(getBitsPerSample() == 8 && getChannels() == 2) m_i2s_std_cfg.clk_cfg.sample_rate_hz = getSampleRate() * 2;
     else m_i2s_std_cfg.clk_cfg.sample_rate_hz = getSampleRate();
 
@@ -5188,7 +5258,7 @@ void Audio::reconfigI2S(){
 
     i2s_channel_reconfig_std_clock(m_i2s_tx_handle, &m_i2s_std_cfg.clk_cfg);
     i2s_channel_reconfig_std_slot(m_i2s_tx_handle, &m_i2s_std_cfg.slot_cfg);
-
+#endif
     I2Sstart();
 
     memset(m_filterBuff, 0, sizeof(m_filterBuff)); // Clear FilterBuffer
@@ -5213,6 +5283,7 @@ void Audio::setI2SCommFMT_LSB(bool commFMT) {
 
     m_f_commFMT = commFMT;
 
+#ifndef USE_ESP_I2S_LIB
     i2s_channel_disable(m_i2s_tx_handle);
     if(commFMT) {
         AUDIO_INFO("commFMT = LSBJ (Least Significant Bit Justified)");
@@ -5224,6 +5295,7 @@ void Audio::setI2SCommFMT_LSB(bool commFMT) {
     }
     i2s_channel_reconfig_std_slot(m_i2s_tx_handle, &m_i2s_std_cfg.slot_cfg);
     i2s_channel_enable(m_i2s_tx_handle);
+#endif	
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 void Audio::computeVUlevel(int16_t sample[2]) {
