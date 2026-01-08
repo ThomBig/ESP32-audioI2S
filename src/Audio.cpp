@@ -321,18 +321,15 @@ void AudioBuffer::showStatus() {
     printf("isEmpty %i, isFull %i\n\n", m_isEmpty, m_isFull);
 }
 
-uint32_t AudioBuffer::getReadPos() { return m_readPtr - m_buffer; }
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 // clang-format off
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 // 📌📌📌  A U D I O   📌📌📌
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
-Audio::Audio(uint8_t i2sPort) {
-
 #ifdef USE_ESP_I2S_LIB	
-	Audio::Audio(I2SClass& i2s_ref, uint8_t i2sPort) : i2s_cl(i2s_ref) {
+Audio::Audio(I2SClass& i2s_ref, uint8_t i2sPort) : i2s_cl(i2s_ref) {
 #else
-	Audio::Audio(uint8_t i2sPort) {
+Audio::Audio(uint8_t i2sPort) {
 #endif
     mutex_playAudioData = xSemaphoreCreateMutex();
     mutex_audioTask = xSemaphoreCreateMutex();
@@ -399,24 +396,10 @@ Audio::~Audio() {
 #else
     i2s_channel_disable(m_i2s_tx_handle);
     i2s_del_channel(m_i2s_tx_handle);
-    x_ps_free(&m_playlistBuff);
-    x_ps_free(&m_chbuf);
-    x_ps_free(&m_lastHost);
-    x_ps_free(&m_outBuff);
-    x_ps_free(&m_ibuff);
-    x_ps_free(&m_lastM3U8host);
-    x_ps_free(&m_speechtxt);
 #endif
-
-	AUDIO_INFO("x_ps_free");
-	
     stopAudioTask();
-	AUDIO_INFO("stopAudioTask");
-    
 	vSemaphoreDelete(mutex_playAudioData);
-	AUDIO_INFO("vSemaphoreDelete: mutex_playAudioData");
-	
-    vSemaphoreDelete(mutex_audioTask);
+	vSemaphoreDelete(mutex_audioTask);
     vSemaphoreDelete(mutex_audioTaskIsDecoding);
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
@@ -449,7 +432,7 @@ void Audio::initInBuff() {
 esp_err_t Audio::I2Sstart() {
     zeroI2Sbuff();
 #ifdef USE_ESP_I2S_LIB
-	AUDIO_INFO("I2Sstart: <ESP_I2S.h>");
+	//AUDIO_INFO("I2Sstart: <ESP_I2S.h>");
 	if (i2s_cl.begin(m_i2s_mode, m_sampleRate, m_i2s_bps, m_i2s_slot))
 	{
 		if (audio_i2s_event) 
@@ -464,18 +447,15 @@ esp_err_t Audio::I2Sstart() {
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 esp_err_t Audio::I2Sstop() {
-    
-#ifdef USE_ESP_I2S_LIB
-    memset(m_outBuff, 0, m_outbuffSize * sizeof(int16_t)); // Clear OutputBuffer
-	if (audio_i2s_event) 
-		audio_i2s_event(0);
-	AUDIO_INFO("I2Send: <ESP_I2S.h>");
-	i2s_cl.end();
-	return ESP_OK;
-#else
     m_outBuff.clear();                                                  // Clear OutputBuffer
     m_samplesBuff48K.clear();                                           // Clear samplesBuff48K
     std::fill(std::begin(m_inputHistory), std::end(m_inputHistory), 0); // Clear history in samplesBuff48K
+#ifdef USE_ESP_I2S_LIB
+	if (audio_i2s_event) 
+		audio_i2s_event(0);
+	i2s_cl.end();
+	return ESP_OK;
+#else
     return i2s_channel_disable(m_i2s_tx_handle);
 #endif
 }
@@ -3554,7 +3534,7 @@ void IRAM_ATTR Audio::playChunk() {
 
 i2swrite:
 #ifdef USE_ESP_I2S_LIB
-	m_plCh.i2s_bytesConsumed = i2s_cl.write((uint8_t*)m_outBuff + count, m_validSamples * m_plCh.sampleSize);
+	m_plCh.i2s_bytesConsumed = i2s_cl.write((uint8_t*)(m_outBuff.get() + m_plCh.count), m_validSamples * m_plCh.sampleSize);
 	m_plCh.err = i2s_cl.lastError();
 #elif SR_48K
     m_plCh.err = i2s_channel_write(m_i2s_tx_handle, m_samplesBuff48K.get() + m_plCh.count, m_validSamples * m_plCh.sampleSize, &m_plCh.i2s_bytesConsumed, 50);
@@ -5930,8 +5910,9 @@ bool Audio::setPinout(uint8_t BCLK, uint8_t LRC, uint8_t DOUT, int8_t MCLK) {
 	I2Sstop();
 	
 #ifdef USE_ESP_I2S_LIB
-	AUDIO_INFO("i2s_cl.setPins: <ESP_I2S.h>");
-	Serial.println("-----> i2s_cl.setPins: <ESP_I2S.h> <------");
+	//AUDIO_INFO("i2s_cl.setPins: <ESP_I2S.h>");
+	//Serial.println("-----> i2s_cl.setPins: <ESP_I2S.h> <------");
+    info(*this, evt_info, "-----> i2s_cl.setPins: <ESP_I2S.h> <------");
 	i2s_cl.setPins(BCLK, LRC, DOUT);
 	result = ESP_OK;
 #else	

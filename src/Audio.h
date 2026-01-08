@@ -4,7 +4,7 @@
  */
 
 // #define SR_48K
-#define USE_ESP_I2S_LIB
+//#define USE_ESP_I2S_LIB
 
 #pragma once
 #pragma GCC optimize("Ofast")
