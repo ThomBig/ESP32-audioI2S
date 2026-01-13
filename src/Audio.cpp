@@ -103,6 +103,35 @@ size_t AudioBuffer::getMaxBlockSize() {
     return m_maxBlockSize;
 }
 //----------------------------------------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief Oblicza całkowitą ilość wolnego miejsca w buforze cyklicznym.
+ *
+ * Funkcja zwraca liczbę bajtów, które pozostają wolne w głównym buforze
+ * (`m_mainBuffSize`), niezależnie od tego, czy wolna przestrzeń jest
+ * ciągła czy podzielona na dwa fragmenty (z powodu zawinięcia wskaźników).
+ *
+ * Logika obejmuje:
+ *
+ * - Jeśli wskaźniki są równe:
+ *   - gdy bufor jest pusty (`m_isEmpty`) — wolne jest całe `m_mainBuffSize`,
+ *   - gdy bufor jest pełny (`m_isFull`) — wolne miejsce wynosi 0,
+ *   - w przeciwnym razie logowany jest błąd niespójności.
+ *
+ * - Jeśli `m_readPtr < m_writePtr`:
+ *   - gdy `m_writePtr` znajduje się w obszarze resBuff (`> m_endPtr`),
+ *     wolne miejsce to przestrzeń od początku bufora do `m_readPtr`,
+ *   - w przeciwnym przypadku wolne miejsce to suma:
+ *       - przestrzeni od `m_writePtr` do końca głównego bufora (`m_endPtr`),
+ *       - przestrzeni od początku bufora do `m_readPtr`.
+ *
+ * - Jeśli `m_readPtr > m_writePtr`:
+ *   wolne miejsce to różnica `m_readPtr - m_writePtr`.
+ *
+ * Funkcja nie używa semafora — zakłada, że wywołujący zapewnia synchronizację,
+ * lub że odczyt wskaźników jest bezpieczny w danym kontekście.
+ *
+ * @return Całkowita liczba wolnych bajtów w buforze.
+ */
 size_t AudioBuffer::freeSpace() {
     if (!m_init) return 0;
     if (m_readPtr == m_writePtr) {
@@ -120,6 +149,34 @@ size_t AudioBuffer::freeSpace() {
     return m_readPtr - m_writePtr;
 }
 //----------------------------------------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief Oblicza całkowitą ilość danych aktualnie znajdujących się w buforze.
+ *
+ * Funkcja zwraca liczbę bajtów zapisanych w buforze cyklicznym, niezależnie
+ * od tego, czy dane znajdują się w jednym ciągłym fragmencie, czy są
+ * podzielone na dwa segmenty z powodu zawinięcia wskaźników.
+ *
+ * Logika obejmuje:
+ *
+ * - Jeśli `m_readPtr == m_writePtr`:
+ *   - gdy bufor jest pusty (`m_isEmpty`) — zwracane jest 0,
+ *   - gdy bufor jest pełny (`m_isFull`) — zwracana jest pełna pojemność
+ *     głównego bufora (`m_mainBuffSize`),
+ *   - w przeciwnym przypadku logowany jest błąd niespójności wskaźników.
+ *
+ * - Jeśli `m_readPtr < m_writePtr`:
+ *   dane znajdują się w jednym ciągłym fragmencie, a ich ilość to
+ *   `m_writePtr - m_readPtr`.
+ *
+ * - Jeśli `m_readPtr > m_writePtr`:
+ *   dane są podzielone na dwa segmenty (zawinięcie bufora), a ich ilość to:
+ *     - od `m_readPtr` do końca głównego bufora (`m_endPtr`),
+ *     - plus od początku bufora (`m_startPtr`) do `m_writePtr`.
+ *
+ * Funkcja jest thread‑safe — wszystkie operacje są chronione semaforem `m_mutex`.
+ *
+ * @return Liczba bajtów aktualnie znajdujących się w buforze.
+ */
 size_t AudioBuffer::bufferFilled() {
     if (!m_init) return 0;
     xSemaphoreTake(m_mutex, portMAX_DELAY);
@@ -145,6 +202,42 @@ end:
     return bufferFilled;
 }
 //----------------------------------------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief Oblicza ilość dostępnej przestrzeni do zapisu w buforze.
+ *
+ * Funkcja zwraca liczbę bajtów, które można jednorazowo zapisać do bufora
+ * począwszy od aktualnego wskaźnika zapisu (`m_writePtr`). Zwracana wartość
+ * obejmuje wyłącznie ciągły fragment pamięci (bez zawijania) i jest
+ * ograniczona przez `m_maxRet`.
+ *
+ * Logika obejmuje:
+ *
+ * - Obsługę stanów specjalnych:
+ *   - jeśli bufor jest pełny (`m_isFull`) — brak miejsca na zapis,
+ *   - jeśli bufor jest pusty (`m_isEmpty`) — można pisać do końca bufora.
+ *
+ * - Obliczenie przestrzeni do końca bufora (`spaceToEnd`), aby określić,
+ *   czy zapis zmieści się bez zawijania.
+ *
+ * - Obsługę przypadku, gdy wskaźnik zapisu dotarł do końca bufora:
+ *   jeśli `spaceToEnd == 0`, a wskaźnik odczytu nie blokuje operacji,
+ *   wykonywana jest kopia fragmentu `resBuff` z końca bufora na jego początek.
+ *   Pozwala to na kontynuację zapisu bez kolizji z danymi oczekującymi na odczyt.
+ *
+ * - Standardową logikę bufora cyklicznego:
+ *   - jeśli `m_writePtr < m_readPtr`, wolna przestrzeń znajduje się
+ *     pomiędzy wskaźnikami,
+ *   - jeśli `m_writePtr > m_readPtr`, wolna przestrzeń jest tylko do końca bufora.
+ *
+ * - Wykrywanie niespójności:
+ *   jeśli `m_writePtr == m_readPtr`, a bufor nie jest oznaczony jako pusty
+ *   ani pełny, funkcja loguje błąd.
+ *
+ * Funkcja jest thread‑safe — wszystkie operacje są chronione semaforem `m_mutex`.
+ *
+ * @return Liczba bajtów możliwych do jednorazowego zapisu.
+ *         Wartość 0 oznacza brak dostępnej przestrzeni.
+ */
 size_t AudioBuffer::writeSpace() {
     if (!m_init) return 0;
     xSemaphoreTake(m_mutex, portMAX_DELAY);
@@ -192,6 +285,33 @@ end:
     return m_writeSpace;
 }
 //----------------------------------------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief Aktualizuje wskaźnik zapisu po dopisaniu danych do bufora.
+ *
+ * Funkcja informuje bufor, że do jego przestrzeni zostało zapisane `bw`
+ * bajtów. Przesuwa wskaźnik zapisu (`m_writePtr`) o podaną liczbę bajtów,
+ * jednocześnie pilnując, aby nie naruszyć integralności bufora cyklicznego.
+ *
+ * Obsługiwane są następujące przypadki:
+ *
+ * - `bw == 0` — brak zmian, szybki powrót.
+ * - `bw > m_writeSpace` — wykrycie błędu logicznego (próba zapisu większej
+ *   liczby bajtów niż wcześniej zgłoszona dostępna przestrzeń).
+ * - Nadpisanie wskaźnika odczytu (`m_writePtr + bw > m_readPtr` przy
+ *   zawinięciu bufora) — funkcja loguje błąd i ustawia `m_writePtr`
+ *   równo z `m_readPtr`, aby zapobiec kolizji.
+ * - Wyjście poza fizyczny koniec bufora (`m_writePtr + bw > m_buffEnd`) —
+ *   funkcja loguje błąd i ustawia wskaźnik zapisu na `m_buffEnd`.
+ *
+ * W normalnym przypadku wskaźnik zapisu jest przesuwany o `bw` bajtów.
+ * Następnie aktualizowane są flagi stanu:
+ * - jeśli po przesunięciu `m_writePtr == m_readPtr`, bufor staje się pełny,
+ * - każdy zapis powoduje ustawienie `m_isEmpty = false`.
+ *
+ * Funkcja jest thread‑safe — operacje są chronione semaforem `m_mutex`.
+ *
+ * @param bw Liczba bajtów, które zostały zapisane do bufora.
+ */
 void AudioBuffer::bytesWritten(size_t bw) {
     if (!m_init) return;
     xSemaphoreTake(m_mutex, portMAX_DELAY);
@@ -221,6 +341,27 @@ end:
     return;
 }
 //----------------------------------------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief Oblicza ilość dostępnych do odczytu danych w buforze.
+ *
+ * Funkcja zwraca liczbę bajtów, które można jednorazowo odczytać
+ * z bufora począwszy od aktualnego wskaźnika odczytu (`m_readPtr`).
+ * Zwracana wartość obejmuje wyłącznie ciągły fragment danych
+ * (bez zawijania na początek bufora) i jest ograniczona przez `m_maxRet`.
+ *
+ * Logika obejmuje:
+ * - korektę wskaźnika odczytu w rzadkich przypadkach niespójności,
+ * - obsługę stanów pusty/pełny,
+ * - obliczenie przestrzeni odczytu dla bufora cyklicznego
+ *   w zależności od relacji `m_readPtr` i `m_writePtr`,
+ * - wykrywanie sytuacji, w której wskaźniki są równe,
+ *   ale bufor nie jest oznaczony jako pusty ani pełny (błąd logiczny).
+ *
+ * Funkcja jest thread‑safe — korzysta z semafora `m_mutex`.
+ *
+ * @return Liczba bajtów możliwych do jednorazowego odczytu.
+ *         Wartość 0 oznacza brak dostępnych danych.
+ */
 size_t AudioBuffer::readSpace() {
     if (!m_init) return 0;
     xSemaphoreTake(m_mutex, portMAX_DELAY);
@@ -257,6 +398,42 @@ end:
     return m_readSpace;
 }
 //----------------------------------------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief Aktualizuje wskaźnik odczytu po pobraniu danych z bufora.
+ *
+ * Funkcja informuje bufor, że zostało z niego odczytane `br` bajtów.
+ * Przesuwa wskaźnik odczytu (`m_readPtr`) o podaną liczbę bajtów,
+ * jednocześnie pilnując, aby nie naruszyć integralności bufora cyklicznego.
+ *
+ * Obsługiwane są następujące przypadki:
+ *
+ * - `br == 0` — brak zmian, szybki powrót.
+ *
+ * - `br > m_readSpace` — wykrycie błędu logicznego (próba odczytu większej
+ *   liczby bajtów niż wcześniej zgłoszona dostępna przestrzeń). Funkcja loguje
+ *   błąd, wprowadza krótkie opóźnienie i kończy działanie bez zmian wskaźników.
+ *
+ * - Nadpisanie wskaźnika zapisu:
+ *   - jeśli `m_readPtr < m_writePtr` i `m_readPtr + br > m_writePtr`,
+ *     oznacza to próbę przekroczenia obszaru zapisanych danych.
+ *     W takim przypadku funkcja loguje błąd, ustawia `m_readPtr = m_writePtr`
+ *     i kończy działanie.
+ *
+ * - Wyjście poza fizyczny koniec bufora:
+ *   - jeśli `m_readPtr + br > m_buffEnd`, funkcja loguje błąd i ustawia
+ *     wskaźnik odczytu na `m_buffEnd`.
+ *
+ * - Normalny przypadek:
+ *   wskaźnik odczytu jest przesuwany o `br` bajtów.
+ *
+ * Po przesunięciu wskaźnika aktualizowane są flagi stanu:
+ * - jeśli `m_readPtr == m_writePtr`, bufor staje się pusty (`m_isEmpty = true`),
+ * - każdy odczyt powoduje ustawienie `m_isFull = false`.
+ *
+ * Funkcja jest thread‑safe — wszystkie operacje są chronione semaforem `m_mutex`.
+ *
+ * @param br Liczba bajtów odczytanych z bufora.
+ */
 void AudioBuffer::bytesWasRead(size_t br) {
     if (!m_init) return;
     xSemaphoreTake(m_mutex, portMAX_DELAY);
@@ -3416,6 +3593,8 @@ void IRAM_ATTR Audio::playChunk() {
     m_plCh.err = ESP_OK;
     m_plCh.i = 0;
 
+    // info(*this, evt_info, "BT: playChunk: m_bitsPerSample: %i, getChannels(): %i", m_bitsPerSample, getChannels());
+
     if (m_plCh.count > 0) goto i2swrite;
 
     m_plCh.validSamples = m_validSamples;
@@ -3541,6 +3720,7 @@ i2swrite:
 #else
     m_plCh.err = i2s_channel_write(m_i2s_tx_handle, m_outBuff.get() + m_plCh.count, m_validSamples * m_plCh.sampleSize, &m_plCh.i2s_bytesConsumed, 20);
     //     AUDIO_LOG_INFO("m_validSamples %i, m_outBuff1[0] %i", m_validSamples, m_outBuff1[0]);
+    // info(*this, evt_info, "i2s_bytesConsumed: %i m_validSamples x m_plCh.sampleSize: %i", m_plCh.i2s_bytesConsumed, m_validSamples * m_plCh.sampleSize);
 #endif
     if (!(m_plCh.err == ESP_OK || m_plCh.err == ESP_ERR_TIMEOUT)) goto exit;
     m_validSamples -= m_plCh.i2s_bytesConsumed / m_plCh.sampleSize;
@@ -3554,12 +3734,13 @@ i2swrite:
     // static int cnt = 0;
     // static uint32_t t = millis();
 
-    // if(t + 10000 < millis()){
-    //     AUDIO_LOG_INFO("%i", cnt);
+    // if (t + 1000 < millis()){
+    //     // AUDIO_LOG_INFO("%i", cnt);
+    //     info(*this, evt_info, "bytes written to I2S: %i", cnt);
     //     cnt = 0;
     //     t = millis();
     // }
-    // cnt+= i2s_bytesConsumed;
+    // cnt += m_plCh.i2s_bytesConsumed;
     //-------------------------------------------
 
     return;
@@ -3605,6 +3786,7 @@ void Audio::loop() {
                 if (m_playlistFormat == FORMAT_ASX) httpPrint(parsePlaylist_ASX());
                 break;
             case AUDIO_DATA:
+                //if (m_streamType == ST_BTSTREAM) processBTStream();
                 if (m_streamType == ST_WEBSTREAM) processWebStream();
                 if (m_streamType == ST_WEBFILE) processWebFile();
                 break;
@@ -4735,11 +4917,17 @@ void Audio::playAudioData() {
 
     bool isFile = false;
     bool isStream = false;
+    bool isBTStream = false;
 
     if (m_dataMode == AUDIO_LOCALFILE) isFile = true;
     if (m_streamType == ST_WEBFILE && m_playlistFormat != FORMAT_M3U8) isFile = true; // local file or webfile but not m3u8 file
     if (m_streamType == ST_WEBSTREAM || m_playlistFormat == FORMAT_M3U8) isStream = true;
-    if (!isFile && !isStream) return;
+    if (m_streamType == ST_BTSTREAM) isBTStream = true;
+    if (!isFile && !isStream && !isBTStream) 
+    {
+        info(*this, evt_info, "BT: m_dataMode: %d, m_streamType: %d, m_playlistFormat: %d", m_dataMode, m_streamType, m_playlistFormat);
+        return;
+    }
 
     xSemaphoreTake(mutex_audioTaskIsDecoding, 0.3 * configTICK_RATE_HZ);
     {
@@ -4785,15 +4973,38 @@ void Audio::playAudioData() {
             }
         }
 
-        if (m_pad.bytesDecoded > 0) {
+        if (isBTStream) {
+            m_pad.bytesToDecode = InBuff.readSpace();
+            if (m_pad.bytesToDecode >= 4)
+            {
+                //info(*this, evt_info, "BT: bytesDecoded 1: %d", m_pad.bytesToDecode);
+                //m_pad.bytesDecoded = sendBytes(InBuff.getReadPtr(), m_pad.bytesToDecode);
+                //info(*this, evt_info, "BT: bytesDecoded 2: %d", m_pad.bytesToDecode);
+
+                //res = m_decoder->decode(data, &m_sbyt.bytesLeft, m_outBuff.get());
+                memcpy(m_outBuff.get(), InBuff.getReadPtr(), m_pad.bytesToDecode);
+                m_validSamples += m_pad.bytesToDecode / 4; // 2 kanały po 16 bitów
+                //m_pad.bytesDecoded = m_pad.bytesToDecode;
+
+                InBuff.bytesWasRead(m_pad.bytesToDecode);
+                size_t l1 = InBuff.readSpace();
+                info(*this, evt_info, "BT: m_pad.bytesToDecode: %i, InBuff.readSpace(): %i, m_validSamples: %i", m_pad.bytesToDecode, l1, m_validSamples);
+            }
+        }
+
+        if (m_pad.bytesDecoded > 0) 
+        {
+            // size_t l1 = InBuff.readSpace();
             InBuff.bytesWasRead(m_pad.bytesDecoded);
+            // size_t l2 = InBuff.readSpace();
             m_audioDataReadPtr += m_pad.bytesDecoded;
+            // info(*this, evt_info, "BT: m_pad.bytesDecoded: %d, InBuff.readSpace() 1 -> 2: %u -> %u", m_pad.bytesDecoded, l1, l2);
         }
     }
 exit:
     xSemaphoreGive(mutex_audioTaskIsDecoding);
 
-    AUDIO_LOG_DEBUG("m_audioDataReadPtr %i, m_audioDataSize %i", m_audioDataReadPtr, m_audioDataSize);
+    // AUDIO_LOG_DEBUG("m_audioDataReadPtr %i, m_audioDataSize %i", m_audioDataReadPtr, m_audioDataSize);
     return;
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
@@ -6144,6 +6355,7 @@ bool Audio::setSampleRate(uint32_t sampRate) {
     }
     m_sampleRate = sampRate;
     reconfigI2S();
+    info(*this, evt_info, "BT: setSampleRate: %d", m_sampleRate);
     return true;
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
@@ -7970,3 +8182,37 @@ uint32_t Audio::getHighWatermark() {
     return highWaterMark; // dwords
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+bool Audio::connecttoBT() {
+
+    xSemaphoreTakeRecursive(mutex_playAudioData, 0.3 * configTICK_RATE_HZ);
+
+    setDefaults(); // free buffers an set defaults
+
+    info(*this, evt_info, "connecting to bt_sink...");
+    m_f_running = true;
+    // m_client->print(rqh.get());
+
+    // m_expectedCodec = CODEC_WAV;
+    m_codec = CODEC_WAV;
+
+    // m_currentHost.clone_from(c_host);
+    // m_lastHost.clone_from(c_host);
+    // info(*this, evt_lasthost, "%s", "bt_sink");
+    m_dataMode = AUDIO_DATA;
+    m_streamType = ST_BTSTREAM;
+    setSampleRate(44100);
+
+    xSemaphoreGiveRecursive(mutex_playAudioData);
+
+    return true;
+}
+// —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+void Audio::writeBTStream(const uint8_t *buffer, size_t size) {
+
+    xSemaphoreTake(mutex_audioTask, 0.3 * configTICK_RATE_HZ); 
+    size_t i2s_bytesConsumed = 0;
+    esp_err_t err = i2s_channel_write(m_i2s_tx_handle, buffer, size, &i2s_bytesConsumed, 20);
+    //info(*this, evt_info, "BT: i2s_channel_write size: %i, consumed: %i result: %i", size, i2s_bytesConsumed, (int)err);
+    xSemaphoreGive(mutex_audioTask);
+}
+// —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————-

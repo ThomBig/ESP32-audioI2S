@@ -4,7 +4,7 @@
  */
 
 // #define SR_48K
-//#define USE_ESP_I2S_LIB
+// #define USE_ESP_I2S_LIB
 
 #pragma once
 #pragma GCC optimize("Ofast")
@@ -133,6 +133,7 @@ class Audio {
     bool             connecttohost(const char* host, const char* user = "", const char* pwd = "");
     bool             connecttospeech(const char* speech, const char* lang);
     bool             connecttoFS(fs::FS& fs, const char* path, int32_t fileStartTime = -1);
+    bool             connecttoBT();
     void             setConnectionTimeout(uint16_t timeout_ms, uint16_t timeout_ms_ssl);
     bool             setAudioPlayTime(uint16_t sec);
     bool             setTimeOffset(int sec);
@@ -167,6 +168,7 @@ class Audio {
     int              getCodec() { return m_codec; }
     const char*      getCodecname() { return codecname[m_codec]; }
     const char*      getVersion() { return audioI2SVers; }
+    void             writeBTStream(const uint8_t *buffer, size_t size);
 
     // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 
@@ -322,8 +324,8 @@ private:
     };
     enum : int { CODEC_NONE = 0, CODEC_WAV = 1, CODEC_MP3 = 2, CODEC_AAC = 3, CODEC_M4A = 4, CODEC_FLAC = 5, CODEC_AACP = 6, CODEC_OPUS = 7, CODEC_OGG = 8, CODEC_VORBIS = 9 };
     const char* codecname[10] = {"unknown", "WAV", "MP3", "AAC", "M4A", "FLAC", "AACP", "OPUS", "OGG", "VORBIS"};
-    enum : int { ST_NONE = 0, ST_WEBFILE = 1, ST_WEBSTREAM = 2 };
-    const char* streamTypeStr[3] = {"NONE", "WEBFILE", "WEBSTREAM"};
+    enum : int { ST_NONE = 0, ST_WEBFILE = 1, ST_WEBSTREAM = 2, ST_BTSTREAM = 3};
+    const char* streamTypeStr[4] = {"NONE", "WEBFILE", "WEBSTREAM", "BTSTREAM"};
     typedef enum { LEFTCHANNEL = 0, RIGHTCHANNEL = 1 } SampleIndex;
     typedef enum { LOWSHELF = 0, PEAKEQ = 1, HIFGSHELF = 2 } FilterType;
 
